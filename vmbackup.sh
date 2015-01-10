@@ -2,11 +2,14 @@
 
 if [ "$#" -ne  3 ]; then
 
-	echo "This script will make a backup of a VM by copying its logical volume and backing up its qemu XML file"
+	echo "This script will make a backup of VMs in the same volume group by copying their logical volumes and backing up their qemu XML files."
+	echo "It will also backup the config/metadata of the volume group in case it needs to be restored as well."
 	echo -e "\e[1;32m"
 	echo "Syntax:"
-	echo "	vmbackup.sh [VM name] [path to logical volume group] [path to backup folder]"
+	echo "	vmbackup.sh [path to logical volume group] [path to backup folder] [backup_targets]"
 	echo -e "\e[0m"
+	echo "Where backup_targets is a newline separated list of VM names."
+	echo "This script makes the assumption that a VM's logical volume has the same name as the VM and each VM has one logical volume."
 	echo "Trailing slashes should not be used on paths"
 
 	exit 1
@@ -16,15 +19,14 @@ fi
 # $2 = path to logical volume
 # $3 = path to backup folder
 create_snapshot(){
-	vm_name=$1
-	lvm_path=$2
-	backup_file=$3/$1".img"
+	backup_file=$temp_folder/$vm_name".img"
 	
 	echo $backup_file
 	
-	lvcreate -L2G -s -n $vm_name"_s" $lvm_path
-	dd if=$lvm_path"_s" of=$backup_file
-	
+	lvcreate -L2G -s -n $vm_name"_s" $logical_volume
+
+	dd if=$lvg_path/$vm_name"_s" of=$backup_file
+
 	if [ ! $? ]; then
 		echo "dd failed running: !!"
 		return 1
@@ -35,35 +37,25 @@ create_snapshot(){
 		return 1
 	fi
 
-	lvremove $lvm_path"_s" -f
+	lvremove $logical_volume"_s" -f
 	if [ ! $? ]; then
 		echo "Snapshot removal failed"
 	fi
-	echo "$lvm_path backed up to $backup_file"
+	echo "Logical volume $vmname backed up to $backup_file"
 }
 
-# $1 = name of logical volume/VM
-# $2 = path to backup folder
 backup_qemu() {
-	vm_name=$1
-	backup_target=$2
-
-	virsh dumpxml $vm_name > $backup_folder/$vm_name.xml
+	virsh dumpxml $vm_name > $temp_folder/$vm_name.xml
 	if [ ! $? ]; then
 		echo "Error dumping VM XML definition"
 		return 1
 	fi
-	echo "qemu XML backed up to $backup_target.xml"
+	echo "qemu XML backed up to $temp_folder/$vm_name.xml"
 }
 
-# $1 = path to logical volume
-# $2 = vm name
 does_vm_exist(){
-	lvm_path=$1
-	vm_name=$2
-	
-	if [ ! -h $lvm_path ]; then
-		echo "A logical volume does not exist at $lvm_path"
+	if [ ! -h $logical_volume ]; then
+		echo "A logical volume does not exist at $logical_volume"
 		return 1
 	fi
 	if ! virsh list --all --name | grep -q -i $vm_name; then
@@ -72,15 +64,10 @@ does_vm_exist(){
 	fi
 }
 
-# $1 = VM name
-# $2 = path to VM backup folder
 compress_vm(){
-	vm_name=$1
-	backup_folder=$2
+	cd $temp_folder
 	
-	cd $backup_folder
-	
-	echo "Compressing $vm_name"
+	echo "Compressing $vm_name in $backup_folder"
 	tar -zcvf $vm_name.tar.gz $vm_name".img" $vm_name".xml"
 	
 	if [ ! $? ]; then
@@ -92,81 +79,88 @@ compress_vm(){
 	rm $vm_name".xml" -f
 }
 
-# $1 = backup folder
 cycle_backups(){
-	backup_folder=$1
-	
+	echo "Cycling backups in $backup_folder"
+	echo ""
+
 	cd $backup_folder
 	rm weekly3 -rf
 	mv weekly2 weekly3
 	mv weekly1 weekly2
-	mkdir weekly1
-	mv temp/* weekly1/
+	mv temp weekly1
 }
 
-# $1 = backup folder
 create_folders(){
-	backup_folder=$1
-
-	mkdir -p $backup_folder
-	cd $backup_folder
-	
-	if [ ! -d weekly3 ]; then
-		mkdir weekly3
+	if [ ! -d $backup_folder/weekly3 ]; then
+		mkdir -p $backup_folder/weekly3
 	fi
-	if [ ! -d weekly2 ]; then
-		mkdir weekly2
+	if [ ! -d $backup_folder/weekly2 ]; then
+		mkdir -p $backup_folder/weekly2
 	fi
-	if [ ! -d weekly1 ]; then
-		mkdir weekly1
+	if [ ! -d $backup_folder/weekly1 ]; then
+		mkdir -p $backup_folder/weekly1
 	fi
-	if [ ! -d temp ]; then
-		mkdir temp
+	if [ ! -d $temp_folder ]; then
+		mkdir -p $temp_folder
 	fi
 }
 
-# $1 = vm name
-# $2 = path to volume group
-# $3 = path to backup folder
 backup_vm(){
-	vm_name=$1
-	logical_volume=$2/$1
-	temp_folder=$3/"temp"
+	logical_volume=$lvg_path/$vm_name
 	
 	echo "Backing up $vm_name..."
-	if ! does_vm_exist $logical_volume $vm_name; then
+	if ! does_vm_exist; then
 		echo "Aborting backup of $vm_name"
-		return 1
+		backup_success=0
+		return
 	fi
 	
-	if ! create_snapshot $vm_name $logical_volume $temp_folder; then
+	if ! create_snapshot; then
 		echo "Snapshot of $logical_volume failed"
-		return 1
+		backup_success=0
+		return
 	fi
 	
-	if ! backup_qemu $vm_name $temp_folder; then
+	if ! backup_qemu; then
 		echo "Could not dump XML definition of VM $vm_name"
-		return 1
+		backup_success=0
+		return
 	fi
 	
-	compress_vm $vm_name $temp_folder
+	compress_vm
 	
 	echo "Backup of $vm_name completed."
+	echo ""
+}
+
+backup_lvg_config(){
+	vgcfgbackup -f $temp_folder/vgcfgbackup $lvg_path
+	echo ""
 }
 
 
 ### Execution Starts Here ###
 
-lvm_path=$1
+lvg_path=$1
 backup_folder=$2
+temp_folder=$backup_folder/temp
 backup_targets=$3
+backup_success=1
 
-create_folders $backup_folder
-cd $backup_folder/vmbackup
+create_folders
 
 while read vm_name
 do
-	backup_vm $vm_name $lvm_path $backup_folder
+	backup_vm 
 done < $backup_targets
 
-cycle_backups $backup_folder
+backup_lvg_config
+
+if [ $backup_success -eq 1 ]; then
+	cycle_backups
+	echo "Backup complete."
+fi
+
+if [ $backup_success -eq 0 ]; then
+	echo "BACKUP FAILED: backups not cycled"
+fi
