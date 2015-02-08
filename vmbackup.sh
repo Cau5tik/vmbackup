@@ -2,11 +2,11 @@
 
 if [ "$#" -ne  3 ]; then
 
-	echo "This script will make a backup of VMs in the same volume group by copying their logical volumes and backing up their qemu XML files."
+	echo "This script will make a backup of VMs stored on zvols within the same pool by copying their logical volumes and backing up their qemu XML files."
 	echo "It will also backup the config/metadata of the volume group in case it needs to be restored as well."
 	echo -e "\e[1;32m"
 	echo "Syntax:"
-	echo "	vmbackup.sh [path to logical volume group] [path to backup folder] [backup_targets]"
+	echo "	vmbackup.sh [zpool name] [path to backup folder] [backup_targets]"
 	echo -e "\e[0m"
 	echo "Where backup_targets is a newline separated list of VM names."
 	echo "This script makes the assumption that a VM's logical volume has the same name as the VM and each VM has one logical volume."
@@ -15,29 +15,23 @@ if [ "$#" -ne  3 ]; then
 	exit 1
 fi
 
-# $1 = name of the logical volue/VM
-# $2 = path to logical volume
-# $3 = path to backup folder
 create_snapshot(){
 	backup_file=$temp_folder/$vm_name".img"
-	
-	echo $backup_file
-	
-	lvcreate -L2G -s -n $vm_name"_s" $logical_volume
 
-	dd if=$lvg_path/$vm_name"_s" of=$backup_file
+	snapshot=$zpool/$vm_name/$vm_name"@backup"
 
-	if [ ! $? ]; then
-		echo "dd failed running: !!"
-		return 1
-	fi
+	echo "Snapshot:"$snapshot
+		
+	zfs snapshot $snapshot
+	
+	zfs send $snapshot > $backup_file
 	
 	if [ ! -s $backup_file ]; then
 		echo "$backup_file could not be created"
 		return 1
 	fi
 
-	lvremove $logical_volume"_s" -f
+	zfs destroy $snapshot
 	if [ ! $? ]; then
 		echo "Snapshot removal failed"
 	fi
@@ -106,7 +100,7 @@ create_folders(){
 }
 
 backup_vm(){
-	logical_volume=$lvg_path/$vm_name
+	logical_volume=$lvg_path/$vm_name/$vm_name
 	
 	echo "Backing up $vm_name..."
 	if ! does_vm_exist; then
@@ -141,7 +135,9 @@ backup_lvg_config(){
 
 ### Execution Starts Here ###
 
-lvg_path=$1
+lvg_path=/dev/zvol/$1
+zpool=$1
+echo $zpool
 backup_folder=$2
 temp_folder=$backup_folder/temp
 backup_targets=$3
