@@ -18,7 +18,7 @@ fi
 create_snapshot(){
 	backup_file=$temp_folder/$vm_name".img"
 
-	snapshot=$zpool/$vm_name/$vm_name"@backup"
+	snapshot=$zpool/$vm_name"@backup"
 
 	echo "Snapshot:"$snapshot
 		
